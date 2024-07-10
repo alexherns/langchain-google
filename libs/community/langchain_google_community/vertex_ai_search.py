@@ -16,8 +16,7 @@ from google.api_core.exceptions import InvalidArgument
 from google.protobuf.json_format import MessageToDict
 from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain_core.documents import Document
-from langchain_core.load import Serializable, load
-from langchain_core.pydantic_v1 import Extra, Field, root_validator
+from langchain_core.pydantic_v1 import BaseModel, Extra, Field, root_validator
 from langchain_core.retrievers import BaseRetriever
 from langchain_core.tools import BaseTool
 from langchain_core.utils import get_from_dict_or_env
@@ -25,7 +24,7 @@ from langchain_core.utils import get_from_dict_or_env
 from langchain_google_community._utils import get_client_info
 
 if TYPE_CHECKING:
-    from google.cloud.discoveryengine_v1beta import (  # type: ignore[import, attr-defined]
+    from google.cloud.discoveryengine_v1alpha import (  # type: ignore[import, attr-defined]
         ConversationalSearchServiceClient,
         SearchRequest,
         SearchResult,
@@ -33,11 +32,7 @@ if TYPE_CHECKING:
     )
 
 
-def _load(dump: Dict[str, Any]) -> Any:
-    return load(dump, valid_namespaces=["langchain_google_community"])
-
-
-class _BaseVertexAISearchRetriever(Serializable):
+class _BaseVertexAISearchRetriever(BaseModel):
     project_id: str
     """Google Cloud Project ID."""
     data_store_id: str
@@ -52,23 +47,16 @@ class _BaseVertexAISearchRetriever(Serializable):
     the environment."""
     engine_data_type: int = Field(default=0, ge=0, le=2)
     """ Defines the Vertex AI Search data type
-    0 - Unstructured data 
+    0 - Unstructured data
     1 - Structured data
     2 - Website data
     """
-
-    @classmethod
-    def is_lc_serializable(self) -> bool:
-        return True
-
-    def __reduce__(self) -> Any:
-        return _load, (self.to_json(),)
 
     @root_validator(pre=True)
     def validate_environment(cls, values: Dict) -> Dict:
         """Validates the environment."""
         try:
-            from google.cloud import discoveryengine_v1beta  # noqa: F401
+            from google.cloud import discoveryengine_v1alpha  # noqa: F401
         except ImportError as exc:
             raise ImportError(
                 "Could not import google-cloud-discoveryengine python package. "
@@ -136,30 +124,18 @@ class _BaseVertexAISearchRetriever(Serializable):
         documents: List[Document] = []
 
         for result in results:
-            document_dict = MessageToDict(
-                result.document._pb, preserving_proto_field_name=True
-            )
-            derived_struct_data = document_dict.get("derived_struct_data")
-            if not derived_struct_data:
-                continue
+            chunk = result.chunk
 
-            doc_metadata = document_dict.get("struct_data", {})
-            doc_metadata["id"] = document_dict["id"]
+            doc_metadata = {}
+            doc_metadata["id"] = chunk.document_metadata.uri
 
-            if chunk_type not in derived_struct_data:
-                continue
+            doc_metadata["source"] = chunk.document_metadata.uri
 
-            for chunk in derived_struct_data[chunk_type]:
-                doc_metadata["source"] = derived_struct_data.get("link", "")
-
-                if chunk_type == "extractive_answers":
-                    doc_metadata["source"] += f":{chunk.get('pageNumber', '')}"
-
-                documents.append(
-                    Document(
-                        page_content=chunk.get("content", ""), metadata=doc_metadata
-                    )
+            documents.append(
+                Document(
+                    page_content=chunk.content, metadata=doc_metadata
                 )
+            )
 
         return documents
 
@@ -229,27 +205,21 @@ class VertexAISearchRetriever(BaseRetriever, _BaseVertexAISearchRetriever):
     """
     query_expansion_condition: int = Field(default=1, ge=0, le=2)
     """Specification to determine under which conditions query expansion should occur.
-    0 - Unspecified query expansion condition. In this case, server behavior defaults 
+    0 - Unspecified query expansion condition. In this case, server behavior defaults
         to disabled
-    1 - Disabled query expansion. Only the exact search query is used, even if 
+    1 - Disabled query expansion. Only the exact search query is used, even if
         SearchResponse.total_size is zero.
     2 - Automatic query expansion built by the Search API.
     """
     spell_correction_mode: int = Field(default=2, ge=0, le=2)
     """Specification to determine under which conditions query expansion should occur.
-    0 - Unspecified spell correction mode. In this case, server behavior defaults 
+    0 - Unspecified spell correction mode. In this case, server behavior defaults
         to auto.
     1 - Suggestion only. Search API will try to find a spell suggestion if there is any
         and put in the `SearchResponse.corrected_query`.
         The spell suggestion will not be used as the search query.
     2 - Automatic spell correction built by the Search API.
         Search will be based on the corrected query if found.
-    """
-    boost_spec: Optional[Dict[Any, Any]] = None
-    """BoostSpec for boosting search results. A protobuf should be provided.
-    
-    https://cloud.google.com/generative-ai-app-builder/docs/boost-search-results
-    https://cloud.google.com/generative-ai-app-builder/docs/reference/rest/v1beta/BoostSpec
     """
 
     _client: SearchServiceClient
@@ -258,14 +228,14 @@ class VertexAISearchRetriever(BaseRetriever, _BaseVertexAISearchRetriever):
     class Config:
         """Configuration for this pydantic object."""
 
-        extra = Extra.forbid
+        extra = Extra.ignore
         arbitrary_types_allowed = True
         underscore_attrs_are_private = True
 
     def __init__(self, **kwargs: Any) -> None:
         """Initializes private fields."""
         try:
-            from google.cloud.discoveryengine_v1beta import SearchServiceClient
+            from google.cloud.discoveryengine_v1alpha import SearchServiceClient
         except ImportError as exc:
             raise ImportError(
                 "Could not import google-cloud-discoveryengine python package. "
@@ -273,11 +243,7 @@ class VertexAISearchRetriever(BaseRetriever, _BaseVertexAISearchRetriever):
                 "`pip install langchain-google-community[vertexaisearch]`"
             ) from exc
 
-        try:
-            super().__init__(**kwargs)
-        except ValueError as e:
-            print(f"Error initializing GoogleVertexAISearchRetriever: {str(e)}")
-            raise
+        super().__init__(**kwargs)
 
         #  For more information, refer to:
         # https://cloud.google.com/generative-ai-app-builder/docs/locations#specify_a_multi-region_for_your_data_store
@@ -297,7 +263,7 @@ class VertexAISearchRetriever(BaseRetriever, _BaseVertexAISearchRetriever):
     def _get_content_spec_kwargs(self) -> Optional[Dict[str, Any]]:
         """Prepares a ContentSpec object."""
 
-        from google.cloud.discoveryengine_v1beta import SearchRequest
+        from google.cloud.discoveryengine_v1alpha import SearchRequest
 
         if self.engine_data_type == 0:
             if self.get_extractive_answers:
@@ -334,7 +300,7 @@ class VertexAISearchRetriever(BaseRetriever, _BaseVertexAISearchRetriever):
 
     def _create_search_request(self, query: str) -> SearchRequest:
         """Prepares a SearchRequest object."""
-        from google.cloud.discoveryengine_v1beta import SearchRequest
+        from google.cloud.discoveryengine_v1alpha import SearchRequest
 
         query_expansion_spec = SearchRequest.QueryExpansionSpec(
             condition=self.query_expansion_condition,
@@ -361,9 +327,6 @@ class VertexAISearchRetriever(BaseRetriever, _BaseVertexAISearchRetriever):
             content_search_spec=content_search_spec,
             query_expansion_spec=query_expansion_spec,
             spell_correction_spec=spell_correction_spec,
-            boost_spec=SearchRequest.BoostSpec(**self.boost_spec)
-            if self.boost_spec
-            else None,
         )
 
     def _get_relevant_documents(
@@ -427,7 +390,7 @@ class VertexAIMultiTurnSearchRetriever(BaseRetriever, _BaseVertexAISearchRetriev
 
     def __init__(self, **kwargs: Any):
         super().__init__(**kwargs)
-        from google.cloud.discoveryengine_v1beta import (
+        from google.cloud.discoveryengine_v1alpha import (
             ConversationalSearchServiceClient,
         )
 
@@ -455,7 +418,7 @@ class VertexAIMultiTurnSearchRetriever(BaseRetriever, _BaseVertexAISearchRetriev
         self, query: str, *, run_manager: CallbackManagerForRetrieverRun
     ) -> List[Document]:
         """Get documents relevant for a query."""
-        from google.cloud.discoveryengine_v1beta import (
+        from google.cloud.discoveryengine_v1alpha import (
             ConverseConversationRequest,
             TextInput,
         )
@@ -509,7 +472,7 @@ class VertexAISearchSummaryTool(BaseTool, VertexAISearchRetriever):
         Returns:
             kwargs for the specification of the content.
         """
-        from google.cloud.discoveryengine_v1beta import SearchRequest
+        from google.cloud.discoveryengine_v1alpha import SearchRequest
 
         kwargs = super()._get_content_spec_kwargs() or {}
 
